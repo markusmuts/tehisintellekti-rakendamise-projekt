@@ -49,7 +49,7 @@ Millises formaadis andmeid hoiustatakse? Mis on andmete maht ja andmestiku suuru
 ### 🟠 2.4 Andmete kirjeldamise vajadus
 Milliseid samme on vaja teha, et kirjeldada olemasolevaid andmeid ja nende kvaliteeti.
 
-> ...
+> Vaja on analüüsida 223 veeru tähendused ning välja valida olulised veerud. Seejärel on vaja valida õige veerg info leidmiseks, puhastada json väljad, panna kokku vabatekstilised kirjeldavad tunnused keelemudelile või RAG süsteemile analüüsiks. Vaja on üle vaadata puuduvate tunnuste hulk ning otsustada, mida nendega ette võtta.
 
 <br>
 <br>
@@ -61,12 +61,12 @@ Fookus: Toordokumentide viimine tehisintellekti jaoks sobivasse formaati.
 ### 🟡 3.1 Puhastamise strateegia
 Milliseid samme on vaja teha andmete puhastamiseks ja standardiseerimiseks? Kui suur on ettevalmistusele kuluv aja- või rahaline ressurss?
 
-> ...
+> Andmed on vaja puhastada natukene sarnasel viisil nagu 2.4 andmete kirjelduses mainitud. Võimalik, et oleks vaja imputeerida puuduvaid andmeid või neid otsida mõnest teisest ÕIS2 APIst või järeldada muudest andmetest. Andmete puhastamisele võiks kuluda umbes 1 nädal.
 
 ### 🟡 3.2 Tehisintellektispetsiifiline ettevalmistus
 Kuidas andmed tehisintellekti mudelile sobivaks tehakse (nt tükeldamine, vektoriseerimine, metaandmete lisamine)?
 
-> ...
+> Olenevalt erinevatest meetoditest saame anda tehisintellektile kirjelduse andmetest ning ligipääsu puhastatud andmetele, et neid vajadusel filtreerida jne. RAG süsteemi jaoks on vaja välja valida aineid kirjeldavad veerud ning teha iga aine jaoks üks kirjeldav tekst. Valitud andmed tuleb vektoresituse kujule viimise mudeliga teisendada vektoriteks. Selle abil saab RAG süsteem semantiliselt otsingu järgi valida otsingule vastavad ained.
 
 <br>
 <br>
