@@ -161,7 +161,7 @@ if prompt and not disable_submit:
                 )
                 response = st.write_stream(stream)
                 st.session_state.messages.append({"role": "assistant", "content": response})
-                # Tokenite ja kulu arvestus (kui usage olemas)
+                # Kasutame väärtusi valikmenüüdes
                 completion = client.chat.completions.create(
                     model="google/gemma-3-27b-it",
                     messages=messages_to_send
