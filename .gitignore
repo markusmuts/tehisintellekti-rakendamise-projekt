@@ -1,4 +1,5 @@
-*.yml
 .ipyn*/
 .env
 jailbreak.txt
+tagasiside_log.csv
+sessions/
