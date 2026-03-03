@@ -4,11 +4,22 @@ import numpy as np
 import csv
 import os
 import json
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from benchmark import (
+    parse_expected_ids,
+    ids_in_response,
+    build_safety_system_prompt,
+    LLM_MODEL,
+    COST_PER_INPUT_M,
+    COST_PER_OUTPUT_M,
+    RESULTS_DIR,
+    TEST_CASES_CSV,
+)
 
 # --- API VÕTME LAADIMINE ---
 load_dotenv()
@@ -161,6 +172,8 @@ for key, default in {
     "filter_no_prereqs": False,
     "confirm_delete_id": None,
     "confirm_delete_title": "",
+    "benchmark_results": None,
+    "benchmark_summary": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -291,6 +304,178 @@ with st.sidebar:
         with col_s4:
             st.metric("📤 Väljund", f"{st.session_state.total_output_tokens:,} tk")
         st.metric("💰 Kulu", f"${st.session_state.total_cost:.6f}")
+
+    st.divider()
+    st.header("Testid")
+    with st.expander("🧪 Testid", expanded=False):
+        bm_top_k = 5
+        _bm_total_cases = len(pd.read_csv(TEST_CASES_CSV))
+        bm_limit_raw = st.number_input(
+            "Testjuhtumite arv (0 = kõik)", min_value=0, max_value=_bm_total_cases, value=0, step=1, key="bm_limit"
+        )
+        bm_limit = int(bm_limit_raw) if bm_limit_raw > 0 else None
+
+        run_bm = st.button("▶️ Käivita test", use_container_width=True, disabled=not api_key)
+        if not api_key:
+            st.caption("⚠️ API võti puudub – benchmark pole saadaval.")
+
+        if run_bm and api_key:
+            st.session_state.benchmark_results = None
+            st.session_state.benchmark_summary = None
+
+            bm_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+            bm_merged = pd.merge(df, embeddings_df, on="unique_ID")
+            bm_matrix = np.stack(bm_merged["embedding"].values)
+
+            bm_test_df = pd.read_csv(TEST_CASES_CSV)
+            bm_query_col = bm_test_df.columns[0]
+            bm_expected_col = bm_test_df.columns[1]
+            if bm_limit:
+                bm_test_df = bm_test_df.sample(n=min(bm_limit, len(bm_test_df))).reset_index(drop=True)
+
+            bm_rows = []
+            bm_total = len(bm_test_df)
+            bm_total_expected = 0
+            bm_total_found = 0
+            bm_full_hits = 0
+            bm_partial_hits = 0
+            bm_skipped = 0
+
+            bm_progress = st.progress(0, text="Benchmark käib...")
+
+            for bm_i, (_, bm_row) in enumerate(bm_test_df.iterrows()):
+                bm_query = str(bm_row[bm_query_col]).strip()
+                bm_expected_ids = parse_expected_ids(str(bm_row[bm_expected_col]))
+                bm_has_expected = len(bm_expected_ids) > 0
+
+                bm_progress.progress(
+                    bm_i / bm_total,
+                    text=f"[{bm_i + 1}/{bm_total}] {bm_query[:55]}...",
+                )
+
+                # RAG
+                bm_qvec = embedder.encode([bm_query])[0]
+                bm_scores = cosine_similarity([bm_qvec], bm_matrix)[0]
+                bm_top_idx = np.argsort(bm_scores)[::-1][:bm_top_k]
+                bm_res_df = bm_merged.iloc[bm_top_idx].copy()
+                bm_res_df["score"] = bm_scores[bm_top_idx]
+                bm_context = bm_res_df.drop(columns=["score", "embedding"], errors="ignore").to_string()
+                bm_retrieved_ids = bm_res_df["unique_ID"].tolist()
+
+                # LLM
+                bm_sys_prompt = build_safety_system_prompt(bm_context)
+                bm_messages = [
+                    {"role": "system", "content": bm_sys_prompt},
+                    {"role": "user", "content": bm_query},
+                ]
+                bm_llm_response = ""
+                bm_in_tok = bm_out_tok = 0
+                bm_cost = 0.0
+                bm_err = ""
+                try:
+                    bm_completion = bm_client.chat.completions.create(
+                        model=LLM_MODEL, messages=bm_messages
+                    )
+                    bm_llm_response = bm_completion.choices[0].message.content or ""
+                    bm_in_tok = bm_completion.usage.prompt_tokens
+                    bm_out_tok = bm_completion.usage.completion_tokens
+                    bm_cost = (bm_in_tok * COST_PER_INPUT_M + bm_out_tok * COST_PER_OUTPUT_M) / 1_000_000
+                except Exception as bm_e:
+                    bm_err = str(bm_e)
+
+                if not bm_err:
+                    bm_found_flags = ids_in_response(bm_expected_ids, bm_llm_response)
+                    bm_found = [eid for eid, f in zip(bm_expected_ids, bm_found_flags) if f]
+                    bm_missing = [eid for eid, f in zip(bm_expected_ids, bm_found_flags) if not f]
+                    bm_n_exp = len(bm_expected_ids)
+                    bm_n_found = sum(bm_found_flags)
+                    bm_full_hit = bm_n_found == bm_n_exp
+                    bm_partial_hit = bm_n_found > 0
+                    bm_total_expected += bm_n_exp
+                    bm_total_found += bm_n_found
+                    if bm_full_hit:
+                        bm_full_hits += 1
+                    if bm_partial_hit:
+                        bm_partial_hits += 1
+                else:
+                    bm_found = []
+                    bm_missing = []
+                    bm_n_exp = bm_n_found = 0
+                    bm_full_hit = bm_partial_hit = False
+
+                bm_rows.append({
+                    "päring": bm_query,
+                    "oodatavad_id": "; ".join(bm_expected_ids),
+                    "leitud_rag_top_k": "; ".join(bm_retrieved_ids),
+                    "llm_vastus": bm_llm_response,
+                    "leitud_id": "; ".join(bm_found),
+                    "puuduvad_id": "; ".join(bm_missing),
+                    "oodatavaid": bm_n_exp,
+                    "leiti": bm_n_found,
+                    "täis_tabamus": bm_full_hit,
+                    "osaline_tabamus": bm_partial_hit,
+                    "on_oodatavad": bm_has_expected,
+                    "llm_viga": bm_err,
+                    "kulu_usd": bm_cost,
+                })
+                time.sleep(0.3)
+
+            bm_progress.progress(1.0, text="Benchmark lõpetatud!")
+
+            bm_evaluable = bm_total - bm_skipped
+            bm_full_rate = bm_full_hits / bm_evaluable if bm_evaluable else 0.0
+            bm_partial_rate = bm_partial_hits / bm_evaluable if bm_evaluable else 0.0
+            bm_recall = bm_total_found / bm_total_expected if bm_total_expected else 0.0
+            bm_total_cost = sum(r["kulu_usd"] for r in bm_rows)
+
+            bm_df_out = pd.DataFrame(bm_rows)
+            os.makedirs(RESULTS_DIR, exist_ok=True)
+            bm_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            bm_path = os.path.join(RESULTS_DIR, f"benchmark_{bm_ts}.csv")
+            bm_df_out.to_csv(bm_path, index=False, encoding="utf-8-sig")
+
+            st.session_state.benchmark_results = bm_df_out
+            st.session_state.benchmark_summary = {
+                "total": bm_total,
+                "evaluable": bm_evaluable,
+                "skipped": bm_skipped,
+                "full_hits": bm_full_hits,
+                "partial_hits": bm_partial_hits,
+                "full_hit_rate": bm_full_rate,
+                "partial_hit_rate": bm_partial_rate,
+                "total_found": bm_total_found,
+                "total_expected": bm_total_expected,
+                "recall": bm_recall,
+                "total_cost": bm_total_cost,
+                "results_path": bm_path,
+            }
+            st.rerun()
+
+        if st.session_state.benchmark_summary:
+            sm = st.session_state.benchmark_summary
+            st.success(f"Salvestatud: {sm['results_path']}")
+            bm_col1, bm_col2, bm_col3 = st.columns(3)
+            with bm_col1:
+                st.metric("Täis tabamused", f"{sm['full_hit_rate']:.1%}")
+                st.caption(f"{sm['full_hits']}/{sm['evaluable']} testjuhtumit")
+            with bm_col2:
+                st.metric("Osalised", f"{sm['partial_hit_rate']:.1%}")
+                st.caption(f"{sm['partial_hits']}/{sm['evaluable']} testjuhtumit")
+            with bm_col3:
+                st.metric("Recall", f"{sm['recall']:.1%}")
+                st.caption(f"{sm['total_found']}/{sm['total_expected']} ID-d")
+            st.caption(
+                f"Hinnatavaid: {sm['evaluable']}  |  Vahele jäetud: {sm['skipped']}  |  Kulu: ${sm['total_cost']:.4f}"
+            )
+
+        if st.session_state.benchmark_results is not None:
+            bm_show_cols = ["päring", "oodatavad_id", "leitud_id", "puuduvad_id", "täis_tabamus", "leiti", "oodatavaid"]
+            st.dataframe(
+                st.session_state.benchmark_results[
+                    [c for c in bm_show_cols if c in st.session_state.benchmark_results.columns]
+                ],
+                hide_index=True,
+            )
 
 
 # --- VESTLUSE LOGIIKA JA AJALUGU ---

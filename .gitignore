@@ -3,3 +3,5 @@
 jailbreak.txt
 tagasiside_log.csv
 sessions/
+benchmark_results/
+__pycache__/
